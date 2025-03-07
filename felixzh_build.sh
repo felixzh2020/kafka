@@ -1,0 +1,1 @@
+ /d/downloads/gradle-8.8/bin/gradle clean releaseTarGz -x test

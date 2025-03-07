@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets
 
 buildscript {
   repositories {
+    maven { url 'https://repo.huaweicloud.com/repository/maven/' }
     mavenCentral()
   }
   apply from: "$rootDir/gradle/dependencies.gradle"
@@ -129,6 +130,7 @@ ext {
 allprojects {
 
   repositories {
+    maven { url 'https://repo.huaweicloud.com/repository/maven/' }
     mavenCentral()
   }
 
