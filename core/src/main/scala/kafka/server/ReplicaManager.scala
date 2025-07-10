@@ -1819,11 +1819,16 @@ class ReplicaManager(val config: KafkaConfig,
       warn(s"Broker $localBrokerId stopped fetcher for partitions ${newOfflinePartitions.mkString(",")} and stopped moving logs " +
            s"for partitions ${partitionsWithOfflineFutureReplica.mkString(",")} because they are in the failed log directory $dir.")
     }
-    logManager.handleLogDirFailure(dir)
 
-    if (sendZkNotification)
-      zkClient.propagateLogDirEvent(localBrokerId)
-    warn(s"Stopped serving replicas in dir $dir")
+    try{
+      logManager.handleLogDirFailure(dir)
+    } catch {
+      case e: Exception => error(e.getMessage)
+    } finally {
+      if (sendZkNotification)
+        zkClient.propagateLogDirEvent(localBrokerId)
+      warn(s"Stopped serving replicas in dir $dir")
+    }
   }
 
   def removeMetrics(): Unit = {

@@ -210,6 +210,13 @@ public class MirrorConnectorConfig extends AbstractConfig {
     protected static final String SOURCE_ADMIN_CLIENT_PREFIX = "source.admin.";
     protected static final String TARGET_ADMIN_CLIENT_PREFIX = "target.admin.";
 
+    protected static final String TARGET_CONSUMER_PREFIX = "target.consumer.";
+
+    public static final String REPLICATION_DIRECTION_SWITCH_ENABLED = "replication.direction.switch.enable";
+    public static final String REPLICATION_DIRECTION_SWITCH_ENABLED_DOC = "Data consistency(exactly-once) is supported when replication direction is switched.";
+
+    public static final String REPLICATION_DIRECTION_SWITCH_POLICY_CLASS = "org.apache.kafka.connect.mirror.IdentityReplicationPolicy";
+
     public MirrorConnectorConfig(Map<String, String> props) {
         this(CONNECTOR_CONFIG_DEF, ConfigUtils.translateDeprecatedConfigs(props, new String[][]{
             {TOPICS_EXCLUDE, TOPICS_EXCLUDE_ALIAS},
@@ -227,6 +234,10 @@ public class MirrorConnectorConfig extends AbstractConfig {
 
     boolean enabled() {
         return getBoolean(ENABLED);
+    }
+
+    boolean replicationDirectionSwitchEnable() {
+        return getBoolean(REPLICATION_DIRECTION_SWITCH_ENABLED);
     }
 
     Duration consumerPollTimeout() {
@@ -250,6 +261,17 @@ public class MirrorConnectorConfig extends AbstractConfig {
         props.putAll(originalsWithPrefix(SOURCE_CLUSTER_PREFIX));
         props.keySet().retainAll(MirrorClientConfig.CLIENT_CONFIG_DEF.names());
         props.putAll(originalsWithPrefix(CONSUMER_CLIENT_PREFIX));
+        props.put(ENABLE_AUTO_COMMIT_CONFIG, "false");
+        props.put(AUTO_OFFSET_RESET_CONFIG, "earliest");
+        return props;
+    }
+
+    Map<String, Object> targetConsumerConfig() {
+        Map<String, Object> props = new HashMap<>();
+        props.putAll(originalsWithPrefix(TARGET_CLUSTER_PREFIX));
+        props.keySet().retainAll(MirrorClientConfig.CLIENT_CONFIG_DEF.names());
+        props.putAll(originalsWithPrefix(CONSUMER_CLIENT_PREFIX));
+        props.putAll(originalsWithPrefix(TARGET_CONSUMER_PREFIX));
         props.put(ENABLE_AUTO_COMMIT_CONFIG, "false");
         props.put(AUTO_OFFSET_RESET_CONFIG, "earliest");
         return props;
@@ -314,6 +336,11 @@ public class MirrorConnectorConfig extends AbstractConfig {
     String offsetSyncsTopic() {
         // ".internal" suffix ensures this doesn't get replicated
         return "mm2-offset-syncs." + targetClusterAlias() + ".internal";
+    }
+
+    String targetClusterOffsetSyncsTopic() {
+        // ".internal" suffix ensures this doesn't get replicated
+        return "mm2-offset-syncs." + sourceClusterAlias() + ".internal";
     }
 
     String heartbeatsTopic() {
@@ -393,6 +420,10 @@ public class MirrorConnectorConfig extends AbstractConfig {
         return getConfiguredInstance(REPLICATION_POLICY_CLASS, ReplicationPolicy.class);
     }
 
+    String getReplicationPolicy() {
+        return get(REPLICATION_POLICY_CLASS).toString().replace("class", "");
+    }
+
     int replicationFactor() {
         return getInt(REPLICATION_FACTOR);
     }
@@ -437,6 +468,11 @@ public class MirrorConnectorConfig extends AbstractConfig {
                     true,
                     ConfigDef.Importance.LOW,
                     ENABLED_DOC)
+            .define(REPLICATION_DIRECTION_SWITCH_ENABLED,
+                    ConfigDef.Type.BOOLEAN,
+                    false,
+                    ConfigDef.Importance.LOW,
+                    REPLICATION_DIRECTION_SWITCH_ENABLED_DOC)
             .define(
                     TOPICS,
                     ConfigDef.Type.LIST,

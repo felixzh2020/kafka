@@ -16,6 +16,9 @@
  */
 package org.apache.kafka.connect.mirror;
 
+import org.apache.kafka.clients.consumer.Consumer;
+import org.apache.kafka.common.internals.Topic;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.source.SourceTask;
 import org.apache.kafka.connect.source.SourceRecord;
@@ -36,14 +39,12 @@ import org.apache.kafka.common.utils.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Map;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Set;
-import java.util.ArrayList;
+import java.util.*;
 import java.util.stream.Collectors;
 import java.util.concurrent.Semaphore;
 import java.time.Duration;
+
+import static org.apache.kafka.connect.mirror.MirrorConnectorConfig.REPLICATION_DIRECTION_SWITCH_POLICY_CLASS;
 
 /** Replicates a set of topic-partitions. */
 public class MirrorSourceTask extends SourceTask {
@@ -89,8 +90,22 @@ public class MirrorSourceTask extends SourceTask {
         consumer = MirrorUtils.newConsumer(config.sourceConsumerConfig());
         offsetProducer = MirrorUtils.newProducer(config.sourceProducerConfig());
         Set<TopicPartition> taskTopicPartitions = config.taskTopicPartitions();
-        Map<TopicPartition, Long> topicPartitionOffsets = loadOffsets(taskTopicPartitions);
-        consumer.assign(topicPartitionOffsets.keySet());
+        Map<TopicPartition, Long> topicPartitionOffsets;
+
+        boolean replicationDirectionSwitchEnable = config.replicationDirectionSwitchEnable();
+        log.info("==replication.direction.switch.enable: {}", replicationDirectionSwitchEnable);
+        if (replicationDirectionSwitchEnable) {
+            log.info("=={}", config.getReplicationPolicy());
+            if (!config.getReplicationPolicy().trim().equals(REPLICATION_DIRECTION_SWITCH_POLICY_CLASS)) {
+                log.error("When replication.direction.switch.enable=true, must use IdentityReplicationPolicy");
+                System.exit(0);
+            }
+            topicPartitionOffsets = loadSyncOffsets(config, taskTopicPartitions);
+        } else {
+            topicPartitionOffsets = loadOffsets(taskTopicPartitions);
+            consumer.assign(topicPartitionOffsets.keySet());
+        }
+
         log.info("Starting with {} previously uncommitted partitions.", topicPartitionOffsets.entrySet().stream()
             .filter(x -> x.getValue() == 0L).count());
         log.trace("Seeking offsets: {}", topicPartitionOffsets);
@@ -220,6 +235,78 @@ public class MirrorSourceTask extends SourceTask {
  
     private Map<TopicPartition, Long> loadOffsets(Set<TopicPartition> topicPartitions) {
         return topicPartitions.stream().collect(Collectors.toMap(x -> x, x -> loadOffset(x)));
+    }
+
+    private Map<TopicPartition, Long> loadSyncOffsets(MirrorTaskConfig mirrorTaskConfig, Set<TopicPartition> topicPartitionSet) {
+        log.info("==Load offset from topic mm2-offset-syncs");
+        Map<TopicPartition, Long> topicPartitionLongMap = this.loadOffsets(mirrorTaskConfig, topicPartitionSet);
+        log.info("==topicPartitionLongMap: {}", topicPartitionLongMap);
+        this.consumer.assign(topicPartitionSet);
+        return topicPartitionLongMap;
+    }
+
+    private Map<TopicPartition, Long> loadOffsets(MirrorTaskConfig config, Set<TopicPartition> topicPartitions) {
+        Map<TopicPartition, Long> offsetMap = new HashMap<>();
+        Map<TopicPartition, OffsetSync> sourceClusterTopicPartitionOffsetSyncMap =
+                loadOffsetsFromCluster(config.sourceConsumerConfig(), config.offsetSyncsTopic(), this.pollTimeout, topicPartitions);
+        Map<TopicPartition, OffsetSync> targetClusterTopicPartitionOffsetSyncMap =
+                loadOffsetsFromCluster(config.targetConsumerConfig(), config.targetClusterOffsetSyncsTopic(), this.pollTimeout, topicPartitions);
+
+        topicPartitions.forEach(topicPartition -> {
+            OffsetSync sourceClusterOffset = sourceClusterTopicPartitionOffsetSyncMap.get(topicPartition);
+            OffsetSync targetClusterOffset = targetClusterTopicPartitionOffsetSyncMap.get(topicPartition);
+
+            if (sourceClusterOffset != null && targetClusterOffset != null) {
+                long offset = Math.max(sourceClusterOffset.upstreamOffset(), targetClusterOffset.downstreamOffset());
+                offsetMap.put(topicPartition, offset + 1L);
+                log.info("==Topic partition: {} source offset: {}, target offset: {}", topicPartition, sourceClusterOffset.upstreamOffset(), targetClusterOffset.downstreamOffset());
+            } else if(sourceClusterOffset != null) {
+                offsetMap.put(topicPartition, sourceClusterOffset.upstreamOffset() + 1L);
+                log.info("==Topic partition: {} source offset: {}", topicPartition, sourceClusterOffset.upstreamOffset());
+            } else if (targetClusterOffset != null) {
+                offsetMap.put(topicPartition, targetClusterOffset.downstreamOffset() + 1L);
+                log.info("==Topic partition: {} target offset: {}", topicPartition, targetClusterOffset.downstreamOffset());
+            } else {
+                log.info("==Topic partition: {} offset is null, seek to beginning", topicPartition);
+            }
+        });
+        return offsetMap;
+    }
+
+    private Map<TopicPartition, OffsetSync> loadOffsetsFromCluster(Map<String, Object> consumerConfig, String offsetSyncsTopic, Duration timeout, Set<TopicPartition> topicPartitions) {
+        Map<TopicPartition, OffsetSync> offsetSyncs = new HashMap<>();
+        KafkaConsumer<byte[], byte[]> offsetSyncConsumer = new KafkaConsumer<>(consumerConfig, new ByteArrayDeserializer(), new ByteArrayDeserializer());
+
+        try{
+            if (!offsetSyncConsumer.listTopics().containsKey(offsetSyncsTopic)) {
+                return offsetSyncs;
+            }
+
+            TopicPartition offsetSyncTopicPartition = new TopicPartition(offsetSyncsTopic, 0);
+            offsetSyncConsumer.assign(Collections.singleton(offsetSyncTopicPartition));
+            offsetSyncConsumer.seekToBeginning(Collections.singleton(offsetSyncTopicPartition));
+
+            while (!endOfStream(offsetSyncConsumer, Collections.singleton(offsetSyncTopicPartition))) {
+                ConsumerRecords<byte[], byte[]> consumerRecords = offsetSyncConsumer.poll(timeout);
+                consumerRecords.forEach(consumerRecord -> {
+                    OffsetSync offsetSync = OffsetSync.deserializeRecord(consumerRecord);
+                    offsetSyncs.put(offsetSync.topicPartition(), offsetSync);
+                });
+            }
+        } finally {
+            offsetSyncConsumer.close();
+        }
+        return offsetSyncs;
+    }
+
+    private static boolean endOfStream(Consumer<?,?> consumer, Collection<TopicPartition> assignments) {
+        Map<TopicPartition, Long> endOffsets = consumer.endOffsets(assignments);
+        for (TopicPartition topicPartition : assignments) {
+            if (consumer.position(topicPartition) < endOffsets.get(topicPartition)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private Long loadOffset(TopicPartition topicPartition) {

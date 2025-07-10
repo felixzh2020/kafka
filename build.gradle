@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets
 
 buildscript {
   repositories {
+    maven { url 'https://repo.huaweicloud.com/repository/maven/' }
     mavenCentral()
     jcenter()
     maven {
@@ -54,7 +55,8 @@ spotless {
 allprojects {
 
   repositories {
-    mavenCentral()
+    //mavenCentral()
+    maven { url 'https://repo.huaweicloud.com/repository/maven/' }
   }
 
   apply plugin: 'idea'
